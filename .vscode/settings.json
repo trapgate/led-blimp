@@ -1,0 +1,9 @@
+{
+    "editor.rulers": [
+        80
+    ],
+    "terminal.integrated.env.linux": {
+        "PATH": "/home/geoff/.platformio/penv/bin:/home/geoff/.platformio/penv:/home/geoff/bin:/home/geoff/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/geoff/go/bin:/home/geoff/go/bin:/home/geoff/mygo/bin",
+        "PLATFORMIO_CALLER": "vscode"
+    }
+}
