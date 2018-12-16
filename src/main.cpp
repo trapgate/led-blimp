@@ -17,12 +17,23 @@
 
 const uint16_t PixelCount = 24;
 const uint8_t SwitchPin = 12;
-const uint8_t PixelPin = 21;
-// TODO: crank this up to 220 or so for release
+const uint8_t PixelPin = 13;
+
+// The light will pull up to 2.5A if all the leds are fully lit, which is too
+// much for most usb ports. If you're connected to a computer for programing,
+// undefine RELEASE to lower the power requirements.
+#define RELEASE
+
+#ifdef RELEASE
+const uint8_t saturation = 220;
+const float luminance = 0.5f;
+#else
 const uint8_t saturation = 80;
+const float luminance = 0.05f;
+#endif
 
 NeoGamma<NeoGammaTableMethod> cgamma;
-NeoPixelBus<NeoRgbwFeature, Neo800KbpsMethod> ring(PixelCount, PixelPin);
+NeoPixelBus<NeoRgbwFeature, NeoWs2813Method> ring(PixelCount, PixelPin);
 
 RgbwColor black(0,0,0,0);
 RgbwColor red(saturation, 0, 0, 0);
@@ -42,6 +53,7 @@ class animMode
 public:
     virtual void setup() = 0;
     virtual void run() = 0;
+    virtual void stop() = 0;
 };
 
 class modeOff : public animMode
@@ -49,6 +61,7 @@ class modeOff : public animMode
 public:
     void setup() override {ring.ClearTo(black); ring.Show();}
     void run() override {delayMicroseconds(20000);}
+    void stop() override {}
 };
 
 class modeLight : public animMode
@@ -56,14 +69,13 @@ class modeLight : public animMode
 public:
     void setup() override {ring.ClearTo(white); ring.Show();}
     void run() override {delayMicroseconds(20000);}
+    void stop() override {}
 };
 
 class modeFader : public animMode
 {
-    // 10s between colors?
-    const int fadeDelay = 10000;
-    // TODO: Crank this up to 0.4-0.5f for release
-    const float luminance = 0.05f;
+    // 15s between colors?
+    const int fadeDelay = 15000;
     NeoPixelAnimator animations{1};
     animState state[1];
     int inOrOut;
@@ -73,14 +85,29 @@ class modeFader : public animMode
 public:
     void setup() override;
     void run() override;
+    void stop() override;
 };
 
 class modeRotator : public animMode
 {
+    // Location of the two dots chasing each other
+    int dot1;
+    int dot2;
+
+    RgbwColor cols1[PixelCount / 2];
+    RgbwColor cols2[PixelCount / 2];
+
+    animState state[PixelCount];
+    NeoPixelAnimator animations{PixelCount};
+    // For the rotator, delay this long before moving to the next pixel.
+    const uint16_t rotateDelay = 200;
+    void animUpd(const AnimationParam& param);
+    void spin();
+
 public:
     void setup() override;
     void run() override;
-    void drawTail();
+    void stop() override;
 };
 
 animMode* modes[] = {
@@ -119,50 +146,96 @@ int nextPix(int pix)
     return (pix + 1) % PixelCount;
 }
 
-const int16_t tailLen = 10;
-const float maxLightness = 0.4f;
-const int animCount = 10;
-animState state[animCount];
-NeoPixelAnimator animations(animCount);
-// For the rotator, delay this long before moving to the next pixel.
-const uint16_t rotateDelay = 1000 / PixelCount;
-
-void rotateUpd(const AnimationParam& param)
+//
+// modeRotator:
+//
+void modeRotator::animUpd(const AnimationParam& param)
 {
-    if (param.state == AnimationState_Completed)
-    {
-        // done, time to restart this position tracking animation/timer.
-        animations.RestartAnimation(param.index);
+    auto progress = param.progress;
 
-        ring.RotateRight(1);
+    for (auto& s : state) {
+        // Serial.printf("pixel %d, sc %d %d %d, ec %d, %d, %d\n",
+        //     s.pixel, s.StartColor.R, s.StartColor.G, s.StartColor.B, 
+        //     s.EndColor.R, s.EndColor.G, s.EndColor.B);
+        auto col = RgbwColor::LinearBlend(s.StartColor, s.EndColor, progress);
+        ring.SetPixelColor(s.pixel, col);
     }
 }
 
-void modeRotator::drawTail()
+// This is the animation routine called when the next pixel needs to start
+// lighting up.
+void modeRotator::spin()
 {
-    float hue = random(360) / 360.0f;
-    for (uint16_t ix = 0; ix < ring.PixelCount() && ix < tailLen; ix++)
-    {
-        float lightness = ix * maxLightness / tailLen;
-        RgbwColor col = HslColor(hue, 1.0f, lightness);
-        col = cgamma.Correct(col);
+    dot1 = nextPix(dot1);
+    dot2 = nextPix(dot2);
 
-        ring.SetPixelColor(ix, col);
+    // rotate the target color to the next pixel. All other dots should fade to
+    // black.
+    auto p = dot1;
+    for (auto col : cols1) {
+        auto& s = state[p];
+        s.StartColor = s.EndColor;
+        s.EndColor = col;
+        p = prevPix(p);
     }
+    p = dot2;
+    for (auto col : cols2) {
+        auto& s = state[p];
+        s.StartColor = s.EndColor;
+        s.EndColor = col;
+        p = prevPix(p);
+    }
+
+    auto updfn = [this](const AnimationParam& p) { animUpd(p); };
+    animations.StartAnimation(0, rotateDelay, updfn);
 }
 
-// This works, but the rotate method isn't animated. Fix.
 void modeRotator::setup()
 {
     ring.ClearTo(black);
-    drawTail();
-    animations.StartAnimation(0, rotateDelay, rotateUpd);
+    ring.Show();
+
+    dot1 = 0;
+    dot2 = PixelCount / 2;
+
+    // pick two random colors to chase each other.
+    auto col1 = HslColor(random(360) / 360.0f, 1.0f, luminance);
+    auto col2 = HslColor(random(360) / 360.0f, 1.0f, luminance);
+
+    for (int c = 0; c < PixelCount / 2; c++)
+    {
+        float progress = float(c) / float(PixelCount / 2);
+        cols1[c] = RgbwColor::LinearBlend(col1, black, progress);
+        cols2[c] = RgbwColor::LinearBlend(col2, black, progress);
+    }
+
+    int pix = 0;
+    for (auto& pixState : state) {
+        pixState.pixel = pix++;
+        pixState.StartColor = black;
+        pixState.EndColor = black;
+    }
+
+    state[dot1].EndColor = col1;
+    state[dot2].EndColor = col2;
 }
 
 void modeRotator::run()
 {
-    animations.UpdateAnimations();
-    ring.Show();
+    if(animations.IsAnimating())
+    {
+        animations.UpdateAnimations();
+        ring.Show();
+    } 
+    else
+    {
+        // Start an animation
+        spin();
+    }}
+
+void modeRotator::stop()
+{
+    animations.StopAll();
 }
 
 //
@@ -229,12 +302,21 @@ void modeFader::run()
     }
 }
 
+void modeFader::stop()
+{
+    animations.StopAll();
+}
+
 void runMode(int mode)
 {
     static int lastMode = -1;
 
     if(mode != lastMode)
+    {
+        modes[mode]->stop();
+        vTaskDelay(20);
         modes[mode]->setup();
+    }
 
     lastMode = mode;
 
@@ -244,13 +326,23 @@ void runMode(int mode)
 int switchMode(int mode)
 {
     static int lastVal = 0;
+    static unsigned long lastChange = 0;
+
     int val = digitalRead(SwitchPin);
     // If the switch has changed state
     if(val ^ lastVal)
     {
+        // debounce. If there's been a change, we won't report any other changes for
+        // 5ms
+        if ((millis() - lastChange) < 5)
+            return lastVal;
+
         // switch was pressed, now is released. Increment the mode.
         if(val == 0)
             mode = (mode + 1) % modeCount;
+
+        // store the time for debouncing
+        lastChange = millis();
     }
     lastVal = val;
     return mode;
@@ -265,7 +357,12 @@ extern "C" void app_main()
 
     while(true)
     {
+        // this keeps the watchdog from barking.
+        vTaskDelay(1);
+
+        // check whether the switch has been pressed.
         mode = switchMode(mode);
+
         runMode(mode);
     }
 }
