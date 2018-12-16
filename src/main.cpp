@@ -94,15 +94,29 @@ class modeRotator : public animMode
     int dot1;
     int dot2;
 
+    // Target colors for each pixel in the chain.
     RgbwColor cols1[PixelCount / 2];
     RgbwColor cols2[PixelCount / 2];
 
+    // Target colors for the leading pixel.
+    RgbwColor col1Start, col2Start;
+    RgbwColor col1Target, col2Target;
+
     animState state[PixelCount];
     NeoPixelAnimator animations{PixelCount};
+    NeoPixelAnimator switchAnim{PixelCount};
+
     // For the rotator, delay this long before moving to the next pixel.
     const uint16_t rotateDelay = 200;
+    // This is the amount of time it takes to completely change the two rotating
+    // colors for new ones.
+    const uint16_t switchColsDelay = 20000;
     void animUpd(const AnimationParam& param);
+    void switchUpd(const AnimationParam& param);
     void spin();
+    void switchCol();
+    void calcCols(float progress);
+    void newColors();
 
 public:
     void setup() override;
@@ -162,6 +176,13 @@ void modeRotator::animUpd(const AnimationParam& param)
     }
 }
 
+void modeRotator::switchUpd(const AnimationParam& param) {
+    auto progress = param.progress;
+
+    // recalculate the target colors for each pixel.
+    calcCols(progress);
+}
+
 // This is the animation routine called when the next pixel needs to start
 // lighting up.
 void modeRotator::spin()
@@ -190,6 +211,14 @@ void modeRotator::spin()
     animations.StartAnimation(0, rotateDelay, updfn);
 }
 
+void modeRotator::switchCol()
+{
+    newColors();
+
+    auto updfn = [this](const AnimationParam& p) { switchUpd(p); };
+    switchAnim.StartAnimation(0, switchColsDelay, updfn);
+}
+
 void modeRotator::setup()
 {
     ring.ClearTo(black);
@@ -198,17 +227,6 @@ void modeRotator::setup()
     dot1 = 0;
     dot2 = PixelCount / 2;
 
-    // pick two random colors to chase each other.
-    auto col1 = HslColor(random(360) / 360.0f, 1.0f, luminance);
-    auto col2 = HslColor(random(360) / 360.0f, 1.0f, luminance);
-
-    for (int c = 0; c < PixelCount / 2; c++)
-    {
-        float progress = float(c) / float(PixelCount / 2);
-        cols1[c] = RgbwColor::LinearBlend(col1, black, progress);
-        cols2[c] = RgbwColor::LinearBlend(col2, black, progress);
-    }
-
     int pix = 0;
     for (auto& pixState : state) {
         pixState.pixel = pix++;
@@ -216,8 +234,39 @@ void modeRotator::setup()
         pixState.EndColor = black;
     }
 
-    state[dot1].EndColor = col1;
-    state[dot2].EndColor = col2;
+    // pick the colors and setup the targets for each pixel.
+    newColors();
+}
+
+// newColors chooses new colors for the chasing pixels.
+void modeRotator::newColors()
+{
+    col1Start = col1Target;
+    col2Start = col2Target;
+
+    // pick two random colors to chase each other.
+    col1Target = HslColor(random(360) / 360.0f, 1.0f, luminance);
+    col2Target = HslColor(random(360) / 360.0f, 1.0f, luminance);
+
+    calcCols(0.0);
+
+    // state[dot1].EndColor = col1Target;
+    // state[dot2].EndColor = col2Target;
+}
+
+void modeRotator::calcCols(float progress)
+{
+    auto col1 = RgbwColor::LinearBlend(col1Start, col1Target, progress);
+    auto col2 = RgbwColor::LinearBlend(col2Start, col2Target, progress);
+
+    // We have the target colors for the two leading pixels. Now calculate the
+    // target colors for the rest of the pixels in the 2 chains.
+    for (int c = 0; c < PixelCount / 2; c++)
+    {
+        float blend = float(c) / float(PixelCount / 2);
+        cols1[c] = RgbwColor::LinearBlend(col1, col2, blend);
+        cols2[c] = RgbwColor::LinearBlend(col2, col1, blend);
+    }
 }
 
 void modeRotator::run()
@@ -226,12 +275,23 @@ void modeRotator::run()
     {
         animations.UpdateAnimations();
         ring.Show();
-    } 
+    }
     else
     {
         // Start an animation
         spin();
-    }}
+    }
+
+    if(switchAnim.IsAnimating())
+    {
+        switchAnim.UpdateAnimations();
+    } 
+    else 
+    {
+        // start switching to a new color
+        switchCol();
+    }
+}
 
 void modeRotator::stop()
 {
